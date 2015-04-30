@@ -19,6 +19,7 @@
  *	John Ronan <jronan@tssg.org>
  *	Catalin Nicutar <catalin.nicutar@gmail.com>
  *	Brandon Heller <brandonh@stanford.edu>
+ *	Philipp Schmitt <k_schmitt12@cs.uni-kl.de> (modification in scheduling: always use both paths for security)
  *
  *
  *	This program is free software; you can redistribute it and/or
@@ -33,6 +34,8 @@
 
 #include <net/mptcp.h>
 #include <net/sock.h>
+
+static unsigned int pkt_nr = 0;
 
 /* If the sub-socket sk available to send the skb? */
 static int mptcp_is_available(struct sock *sk, struct sk_buff *skb)
@@ -50,7 +53,7 @@ static int mptcp_is_available(struct sock *sk, struct sk_buff *skb)
 		return 0;
 
 	if (tp->pf ||
-	    (tp->mpcb->noneligible & mptcp_pi_to_flag(tp->mptcp->path_index)))
+			(tp->mpcb->noneligible & mptcp_pi_to_flag(tp->mptcp->path_index)))
 		return 0;
 
 	if (inet_csk(sk)->icsk_ca_state == TCP_CA_Loss) {
@@ -71,7 +74,7 @@ static int mptcp_is_available(struct sock *sk, struct sk_buff *skb)
 	if (!tp->mptcp->fully_established) {
 		/* Make sure that we send in-order data */
 		if (skb && tp->mptcp->second_packet &&
-		    tp->mptcp->last_end_data_seq != TCP_SKB_CB(skb)->seq)
+				tp->mptcp->last_end_data_seq != TCP_SKB_CB(skb)->seq)
 			return 0;
 	}
 
@@ -80,8 +83,8 @@ static int mptcp_is_available(struct sock *sk, struct sk_buff *skb)
 	 * calculated end_seq (because here at this point end_seq is still at
 	 * the meta-level).
 	 */
-	if (skb && after(tp->write_seq + skb->len, tcp_wnd_end(tp)))
-		return 0;
+	//	if (skb && after(tp->write_seq + skb->len, tcp_wnd_end(tp)))
+	//		return 0;
 
 	return tcp_cwnd_test(tp, skb);
 }
@@ -96,11 +99,11 @@ static int mptcp_dont_reinject_skb(struct tcp_sock *tp, struct sk_buff *skb)
 	 * subflow-sequence-number space.
 	 */
 	return skb &&
-		/* We either have a data_fin with data or not a data_fin */
-		((mptcp_is_data_fin(skb) && TCP_SKB_CB(skb)->end_seq - TCP_SKB_CB(skb)->seq  > 1) ||
-		!mptcp_is_data_fin(skb)) &&
-		/* Has the skb already been enqueued into this subsocket? */
-		mptcp_pi_to_flag(tp->mptcp->path_index) & TCP_SKB_CB(skb)->path_mask;
+			/* We either have a data_fin with data or not a data_fin */
+			((mptcp_is_data_fin(skb) && TCP_SKB_CB(skb)->end_seq - TCP_SKB_CB(skb)->seq  > 1) ||
+					!mptcp_is_data_fin(skb)) &&
+					/* Has the skb already been enqueued into this subsocket? */
+					mptcp_pi_to_flag(tp->mptcp->path_index) & TCP_SKB_CB(skb)->path_mask;
 }
 
 /* This is the scheduler. This function decides on which flow to send
@@ -111,7 +114,7 @@ static int mptcp_dont_reinject_skb(struct tcp_sock *tp, struct sk_buff *skb)
  * Additionally, this function is aware of the backup-subflows.
  */
 static struct sock *get_available_subflow(struct sock *meta_sk,
-					  struct sk_buff *skb)
+		struct sk_buff *skb)
 {
 	struct mptcp_cb *mpcb = tcp_sk(meta_sk)->mpcb;
 	struct sock *sk, *bestsk = NULL, *lowpriosk = NULL, *backupsk = NULL;
@@ -120,6 +123,7 @@ static struct sock *get_available_subflow(struct sock *meta_sk,
 
 	/* if there is only one subflow, bypass the scheduling function */
 	if (mpcb->cnt_subflows == 1) {
+		pr_info("MPTCP SecSched: There is only one subflow - no multipath-security possible \n");
 		bestsk = (struct sock *)mpcb->connection_list;
 		if (!mptcp_is_available(bestsk, skb))
 			bestsk = NULL;
@@ -128,10 +132,10 @@ static struct sock *get_available_subflow(struct sock *meta_sk,
 
 	/* Answer data_fin on same subflow!!! */
 	if (meta_sk->sk_shutdown & RCV_SHUTDOWN &&
-	    skb && mptcp_is_data_fin(skb)) {
+			skb && mptcp_is_data_fin(skb)) {
 		mptcp_for_each_sk(mpcb, sk) {
 			if (tcp_sk(sk)->mptcp->path_index == mpcb->dfin_path_index &&
-			    mptcp_is_available(sk, skb))
+					mptcp_is_available(sk, skb))
 				return sk;
 		}
 	}
@@ -151,30 +155,49 @@ static struct sock *get_available_subflow(struct sock *meta_sk,
 		}
 
 		if ((tp->mptcp->rcv_low_prio || tp->mptcp->low_prio) &&
-		    tp->srtt < lowprio_min_time_to_peer &&
-		    !(skb && mptcp_pi_to_flag(tp->mptcp->path_index) & TCP_SKB_CB(skb)->path_mask)) {
+				tp->srtt < lowprio_min_time_to_peer &&
+				!(skb && mptcp_pi_to_flag(tp->mptcp->path_index) & TCP_SKB_CB(skb)->path_mask)) {
 			lowprio_min_time_to_peer = tp->srtt;
 			lowpriosk = sk;
 		} else if (!(tp->mptcp->rcv_low_prio || tp->mptcp->low_prio) &&
-		    tp->srtt < min_time_to_peer &&
-		    !(skb && mptcp_pi_to_flag(tp->mptcp->path_index) & TCP_SKB_CB(skb)->path_mask)) {
+				tp->srtt < min_time_to_peer &&
+				!(skb && mptcp_pi_to_flag(tp->mptcp->path_index) & TCP_SKB_CB(skb)->path_mask)) {
 			min_time_to_peer = tp->srtt;
 			bestsk = sk;
 		}
 	}
 
-	if (mpcb->cnt_established == cnt_backups && lowpriosk)
-		return lowpriosk;
-	if (bestsk)
-		return bestsk;
-	if (backupsk) {
-		/* It has been sent on all subflows once - let's give it a
-		 * chance again by restarting its pathmask.
-		 */
-		if (skb)
-			TCP_SKB_CB(skb)->path_mask = 0;
-		return backupsk;
+
+	//	if (mpcb->cnt_established == cnt_backups && lowpriosk)
+	//		return lowpriosk;
+	//	if (bestsk)
+	//		return bestsk;
+	//	if (backupsk) {
+	//		/* It has been sent on all subflows once - let's give it a
+	//		 * chance again by restarting its pathmask.
+	//		 */
+	//		if (skb)
+	//			TCP_SKB_CB(skb)->path_mask = 0;
+	//		return backupsk;
+	//	}
+	if (pkt_nr%10 != 0)
+	{
+		pr_debug("MPTCP-SECSCHED pkt-nr= %i use fastest subflow \n",pkt_nr);
+		pkt_nr++;
+		if (bestsk)
+			return bestsk;
 	}
+	else
+	{
+		pr_debug("MPTCP-SECSCHED pkt-nr= %i use backup subflow \n",pkt_nr);
+		pkt_nr++;
+		if (lowpriosk)
+			return lowpriosk;
+		if (backupsk)
+			return backupsk;
+	}
+	/* should never be reached */
+	pr_debug("MPTCP-SECSCHED no suitable socket found \n");
 	return NULL;
 }
 
@@ -184,8 +207,8 @@ static struct mp_dss *mptcp_skb_find_dss(const struct sk_buff *skb)
 		return NULL;
 
 	return (struct mp_dss *)(skb->data - (MPTCP_SUB_LEN_DSS_ALIGN +
-					      MPTCP_SUB_LEN_ACK_ALIGN +
-					      MPTCP_SUB_LEN_SEQ_ALIGN));
+			MPTCP_SUB_LEN_ACK_ALIGN +
+			MPTCP_SUB_LEN_SEQ_ALIGN));
 }
 
 /* get the data-seq and end-data-seq and store them again in the
@@ -265,7 +288,7 @@ static struct sk_buff *mptcp_pskb_copy(struct sk_buff *skb)
 	}
 
 	copy_skb_header(n, skb);
-out:
+	out:
 	return n;
 }
 
@@ -273,7 +296,7 @@ out:
  * coming from the meta-retransmit-timer
  */
 static void __mptcp_reinject_data(struct sk_buff *orig_skb, struct sock *meta_sk,
-				  struct sock *sk, int clone_it)
+		struct sock *sk, int clone_it)
 {
 	struct sk_buff *skb, *skb1;
 	struct tcp_sock *meta_tp = tcp_sk(meta_sk);
@@ -311,7 +334,7 @@ static void __mptcp_reinject_data(struct sk_buff *orig_skb, struct sock *meta_sk
 
 	/* Only reinject segments that are fully covered by the mapping */
 	if (skb->len + (mptcp_is_data_fin(skb) ? 1 : 0) !=
-	    TCP_SKB_CB(skb)->end_seq - TCP_SKB_CB(skb)->seq) {
+			TCP_SKB_CB(skb)->end_seq - TCP_SKB_CB(skb)->seq) {
 		u32 seq = TCP_SKB_CB(skb)->seq;
 		u32 end_seq = TCP_SKB_CB(skb)->end_seq;
 
@@ -409,8 +432,8 @@ void mptcp_reinject_data(struct sock *sk, int clone_it)
 		 * They are reinjected below (without the subflow-fin-flag)
 		 */
 		if (tcb->tcp_flags & TCPHDR_SYN ||
-		    (tcb->tcp_flags & TCPHDR_FIN && !mptcp_is_data_fin(skb_it)) ||
-		    (tcb->tcp_flags & TCPHDR_FIN && mptcp_is_data_fin(skb_it) && !skb_it->len))
+				(tcb->tcp_flags & TCPHDR_FIN && !mptcp_is_data_fin(skb_it)) ||
+				(tcb->tcp_flags & TCPHDR_FIN && mptcp_is_data_fin(skb_it) && !skb_it->len))
 			continue;
 
 		__mptcp_reinject_data(skb_it, meta_sk, sk, clone_it);
@@ -419,7 +442,7 @@ void mptcp_reinject_data(struct sock *sk, int clone_it)
 	skb_it = tcp_write_queue_tail(meta_sk);
 	/* If sk has sent the empty data-fin, we have to reinject it too. */
 	if (skb_it && mptcp_is_data_fin(skb_it) && skb_it->len == 0 &&
-	    TCP_SKB_CB(skb_it)->path_mask & mptcp_pi_to_flag(tp->mptcp->path_index)) {
+			TCP_SKB_CB(skb_it)->path_mask & mptcp_pi_to_flag(tp->mptcp->path_index)) {
 		__mptcp_reinject_data(skb_it, meta_sk, NULL, 1);
 	}
 
@@ -430,7 +453,7 @@ void mptcp_reinject_data(struct sock *sk, int clone_it)
 
 
 static void mptcp_combine_dfin(struct sk_buff *skb, struct sock *meta_sk,
-			       struct sock *subsk)
+		struct sock *subsk)
 {
 	struct tcp_sock *meta_tp = tcp_sk(meta_sk);
 	struct mptcp_cb *mpcb = meta_tp->mpcb;
@@ -470,7 +493,7 @@ static void mptcp_combine_dfin(struct sk_buff *skb, struct sock *meta_sk,
 }
 
 static struct sk_buff *mptcp_skb_entail(struct sock *sk, struct sk_buff *skb,
-					int reinject)
+		int reinject)
 {
 	__be32 *ptr;
 	__u16 data_len;
@@ -483,7 +506,7 @@ static struct sk_buff *mptcp_skb_entail(struct sock *sk, struct sk_buff *skb,
 
 	if (!reinject)
 		TCP_SKB_CB(skb)->mptcp_flags |= (mpcb->snd_hiseq_index ?
-						  MPTCPHDR_SEQ64_INDEX : 0);
+				MPTCPHDR_SEQ64_INDEX : 0);
 
 	subskb = mptcp_pskb_copy(skb);
 	if (!subskb)
@@ -492,7 +515,7 @@ static struct sk_buff *mptcp_skb_entail(struct sock *sk, struct sk_buff *skb,
 	TCP_SKB_CB(skb)->path_mask |= mptcp_pi_to_flag(tp->mptcp->path_index);
 
 	if (!(sk->sk_route_caps & NETIF_F_ALL_CSUM) &&
-	    skb->ip_summed == CHECKSUM_PARTIAL) {
+			skb->ip_summed == CHECKSUM_PARTIAL) {
 		subskb->csum = skb->csum = skb_checksum(skb, 0, skb->len, 0);
 		subskb->ip_summed = skb->ip_summed = CHECKSUM_NONE;
 	}
@@ -511,7 +534,7 @@ static struct sk_buff *mptcp_skb_entail(struct sock *sk, struct sk_buff *skb,
 		goto no_data_seq;
 
 	if (tp->mpcb->send_infinite_mapping &&
-	    tcb->seq >= mptcp_meta_tp(tp)->snd_nxt) {
+			tcb->seq >= mptcp_meta_tp(tp)->snd_nxt) {
 		tp->mptcp->fully_established = 1;
 		tp->mpcb->infinite_mapping_snd = 1;
 		tp->mptcp->infinite_cutoff_seq = tp->write_seq;
@@ -523,8 +546,8 @@ static struct sk_buff *mptcp_skb_entail(struct sock *sk, struct sk_buff *skb,
 
 	/**** Write MPTCP DSS-option to the packet. ****/
 	ptr = (__be32 *)(subskb->data - (MPTCP_SUB_LEN_DSS_ALIGN +
-				      MPTCP_SUB_LEN_ACK_ALIGN +
-				      MPTCP_SUB_LEN_SEQ_ALIGN));
+			MPTCP_SUB_LEN_ACK_ALIGN +
+			MPTCP_SUB_LEN_SEQ_ALIGN));
 
 	/* Then we start writing it from the start */
 	mdss = (struct mp_dss *)ptr;
@@ -567,11 +590,11 @@ static struct sk_buff *mptcp_skb_entail(struct sock *sk, struct sk_buff *skb,
 				(TCPOPT_NOP));
 	}
 
-no_data_seq:
+	no_data_seq:
 	tcb->seq = tp->write_seq;
 	tcb->sacked = 0; /* reset the sacked field: from the point of view
-			  * of this subflow, we are sending a brand new
-			  * segment */
+	 * of this subflow, we are sending a brand new
+	 * segment */
 	/* Take into account seg len */
 	tp->write_seq += subskb->len + ((tcb->tcp_flags & TCPHDR_FIN) ? 1 : 0);
 	tcb->end_seq = tp->write_seq;
@@ -589,8 +612,8 @@ no_data_seq:
 }
 
 static void mptcp_sub_event_new_data_sent(struct sock *sk,
-					  struct sk_buff *subskb,
-					  struct sk_buff *skb)
+		struct sk_buff *subskb,
+		struct sk_buff *skb)
 {
 	/* If it's a non-payload DATA_FIN (also no subflow-fin), the
 	 * segment is not part of the subflow but on a meta-only-level
@@ -598,7 +621,7 @@ static void mptcp_sub_event_new_data_sent(struct sock *sk,
 	 * We free it, because it has been queued nowhere.
 	 */
 	if (!mptcp_is_data_fin(subskb) ||
-	    (TCP_SKB_CB(subskb)->end_seq != TCP_SKB_CB(subskb)->seq)) {
+			(TCP_SKB_CB(subskb)->end_seq != TCP_SKB_CB(subskb)->seq)) {
 		tcp_event_new_data_sent(sk, subskb);
 		tcp_sk(sk)->mptcp->second_packet = 1;
 		tcp_sk(sk)->mptcp->last_end_data_seq = TCP_SKB_CB(skb)->end_seq;
@@ -609,7 +632,7 @@ static void mptcp_sub_event_new_data_sent(struct sock *sk,
 
 /* Handle the packets and sockets after a tcp_transmit_skb failed */
 static void mptcp_transmit_skb_failed(struct sock *sk, struct sk_buff *skb,
-				      struct sk_buff *subskb, int reinject)
+		struct sk_buff *subskb, int reinject)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
 	struct mptcp_cb *mpcb = tp->mpcb;
@@ -630,9 +653,9 @@ static void mptcp_transmit_skb_failed(struct sock *sk, struct sk_buff *skb,
 		 */
 		if (!tp->packets_out && !inet_csk(sk)->icsk_pending)
 			inet_csk_reset_xmit_timer(sk, ICSK_TIME_PROBE0,
-						  inet_csk(sk)->icsk_rto, TCP_RTO_MAX);
+					inet_csk(sk)->icsk_rto, TCP_RTO_MAX);
 	} else if (mptcp_is_data_fin(subskb) &&
-		   TCP_SKB_CB(subskb)->end_seq == TCP_SKB_CB(subskb)->seq) {
+			TCP_SKB_CB(subskb)->end_seq == TCP_SKB_CB(subskb)->seq) {
 		/* An empty data-fin has not been enqueued on the subflow
 		 * and thus we free it.
 		 */
@@ -663,7 +686,7 @@ static void mptcp_transmit_skb_failed(struct sock *sk, struct sk_buff *skb,
  * Remember, these are still headerless SKBs at this point.
  */
 int mptcp_fragment(struct sock *sk, struct sk_buff *skb, u32 len,
-		   unsigned int mss_now, int reinject)
+		unsigned int mss_now, int reinject)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
 	struct sk_buff *buff;
@@ -671,7 +694,7 @@ int mptcp_fragment(struct sock *sk, struct sk_buff *skb, u32 len,
 	int nlen;
 	u8 flags;
 	int dsslen = MPTCP_SUB_LEN_DSS_ALIGN + MPTCP_SUB_LEN_ACK_ALIGN +
-		     MPTCP_SUB_LEN_SEQ_ALIGN;
+			MPTCP_SUB_LEN_SEQ_ALIGN;
 	char *dss[dsslen];
 
 	if (WARN_ON(len > skb->len))
@@ -686,7 +709,7 @@ int mptcp_fragment(struct sock *sk, struct sk_buff *skb, u32 len,
 		nsize = 0;
 
 	if (skb_cloned(skb) &&
-	    skb_is_nonlinear(skb)) {
+			skb_is_nonlinear(skb)) {
 		if (pskb_expand_head(skb, 0, 0, GFP_ATOMIC))
 			return -ENOMEM;
 		/* Recover dss-option */
@@ -728,8 +751,8 @@ int mptcp_fragment(struct sock *sk, struct sk_buff *skb, u32 len,
 	if (!skb_shinfo(skb)->nr_frags && skb->ip_summed != CHECKSUM_PARTIAL) {
 		/* Copy and checksum data tail into the new buffer. */
 		buff->csum = csum_partial_copy_nocheck(skb->data + len,
-						       skb_put(buff, nsize),
-						       nsize, 0);
+				skb_put(buff, nsize),
+				nsize, 0);
 
 		skb_trim(skb, len);
 
@@ -762,7 +785,7 @@ int mptcp_fragment(struct sock *sk, struct sk_buff *skb, u32 len,
 	 */
 	if (!before(tp->snd_nxt, TCP_SKB_CB(buff)->end_seq) && reinject != 1) {
 		int diff = old_factor - tcp_skb_pcount(skb) -
-			tcp_skb_pcount(buff);
+				tcp_skb_pcount(buff);
 
 		if (diff)
 			tcp_adjust_pcount(sk, skb, diff);
@@ -779,13 +802,13 @@ int mptcp_fragment(struct sock *sk, struct sk_buff *skb, u32 len,
 }
 
 int mptso_fragment(struct sock *sk, struct sk_buff *skb, unsigned int len,
-		   unsigned int mss_now, gfp_t gfp, int reinject)
+		unsigned int mss_now, gfp_t gfp, int reinject)
 {
 	struct sk_buff *buff;
 	int nlen = skb->len - len, old_factor;
 	u8 flags;
 	int dsslen = MPTCP_SUB_LEN_DSS_ALIGN + MPTCP_SUB_LEN_ACK_ALIGN +
-		     MPTCP_SUB_LEN_SEQ_ALIGN;
+			MPTCP_SUB_LEN_SEQ_ALIGN;
 
 	/* All of a TSO frame must be composed of paged data.  */
 	if (skb->len != skb->data_len)
@@ -841,7 +864,7 @@ int mptso_fragment(struct sock *sk, struct sk_buff *skb, unsigned int len,
 	 */
 	if (!before(tcp_sk(sk)->snd_nxt, TCP_SKB_CB(buff)->end_seq) && reinject != 1) {
 		int diff = old_factor - tcp_skb_pcount(skb) -
-			tcp_skb_pcount(buff);
+				tcp_skb_pcount(buff);
 
 		if (diff)
 			tcp_adjust_pcount(sk, skb, diff);
@@ -865,7 +888,7 @@ int mptcp_write_wakeup(struct sock *meta_sk)
 
 	skb = tcp_send_head(meta_sk);
 	if (skb &&
-	    before(TCP_SKB_CB(skb)->seq, tcp_wnd_end(meta_tp))) {
+			before(TCP_SKB_CB(skb)->seq, tcp_wnd_end(meta_tp))) {
 		int err;
 		unsigned int mss;
 		unsigned int seg_size = tcp_wnd_end(meta_tp) - TCP_SKB_CB(skb)->seq;
@@ -882,7 +905,7 @@ int mptcp_write_wakeup(struct sock *meta_sk)
 		 * must have been a result SWS avoidance ( sender )
 		 */
 		if (seg_size < TCP_SKB_CB(skb)->end_seq - TCP_SKB_CB(skb)->seq ||
-		    skb->len > mss) {
+				skb->len > mss) {
 			seg_size = min(seg_size, mss);
 			TCP_SKB_CB(skb)->tcp_flags |= TCPHDR_PSH;
 			if (mptcp_fragment(meta_sk, skb, seg_size, mss, 0))
@@ -904,7 +927,7 @@ int mptcp_write_wakeup(struct sock *meta_sk)
 		}
 
 		mptcp_check_sndseq_wrap(meta_tp, TCP_SKB_CB(skb)->end_seq -
-						 TCP_SKB_CB(skb)->seq);
+				TCP_SKB_CB(skb)->seq);
 		tcp_event_new_data_sent(meta_sk, skb);
 		mptcp_sub_event_new_data_sent(subsk, subskb, skb);
 
@@ -914,7 +937,7 @@ int mptcp_write_wakeup(struct sock *meta_sk)
 		int ans = 0;
 
 		if (between(meta_tp->snd_up, meta_tp->snd_una + 1,
-			    meta_tp->snd_una + 0xFFFF)) {
+				meta_tp->snd_una + 0xFFFF)) {
 			mptcp_for_each_sk(meta_tp->mpcb, sk_it) {
 				if (mptcp_sk_can_send_ack(sk_it))
 					tcp_xmit_probe_skb(sk_it, 1);
@@ -979,7 +1002,7 @@ static struct sk_buff *mptcp_rcv_buf_optimization(struct sock *sk, int penal)
 	/* Half the cwnd of the slow flow */
 	mptcp_for_each_tp(tp->mpcb, tp_it) {
 		if (tp_it != tp &&
-		    TCP_SKB_CB(skb_head)->path_mask & mptcp_pi_to_flag(tp_it->mptcp->path_index)) {
+				TCP_SKB_CB(skb_head)->path_mask & mptcp_pi_to_flag(tp_it->mptcp->path_index)) {
 			/* Only update every subflow rtt */
 			if (tcp_time_stamp - tp_it->mptcp->last_rbuf_opti < tp_it->srtt >> 3)
 				break;
@@ -995,14 +1018,14 @@ static struct sk_buff *mptcp_rcv_buf_optimization(struct sock *sk, int penal)
 		}
 	}
 
-retrans:
+	retrans:
 
 	/* Segment not yet injected into this path? Take it!!! */
 	if (!(TCP_SKB_CB(skb_head)->path_mask & mptcp_pi_to_flag(tp->mptcp->path_index))) {
 		int do_retrans = 0;
 		mptcp_for_each_tp(tp->mpcb, tp_it) {
 			if (tp_it != tp &&
-			    TCP_SKB_CB(skb_head)->path_mask & mptcp_pi_to_flag(tp_it->mptcp->path_index)) {
+					TCP_SKB_CB(skb_head)->path_mask & mptcp_pi_to_flag(tp_it->mptcp->path_index)) {
 				if (tp_it->snd_cwnd <= 4) {
 					do_retrans = 1;
 					break;
@@ -1024,7 +1047,7 @@ retrans:
 }
 
 int mptcp_write_xmit(struct sock *meta_sk, unsigned int mss_now, int nonagle,
-		     int push_one, gfp_t gfp)
+		int push_one, gfp_t gfp)
 {
 	struct tcp_sock *meta_tp = tcp_sk(meta_sk), *subtp;
 	struct sock *subsk;
@@ -1088,7 +1111,7 @@ int mptcp_write_xmit(struct sock *meta_sk, unsigned int mss_now, int nonagle,
 		 * the tcp_send_head should not change.
 		 */
 		BUG_ON(!reinject && tcp_send_head(meta_sk) != skb);
-retry:
+		retry:
 		cwnd_quota = tcp_cwnd_test(subtp, skb);
 		if (!cwnd_quota) {
 			/* May happen, if at the first selection we circumvented
@@ -1111,8 +1134,8 @@ retry:
 
 		if (tso_segs == 1) {
 			if (unlikely(!tcp_nagle_test(meta_tp, skb, mss_now,
-						     (tcp_skb_is_last(meta_sk, skb) ?
-						      nonagle : TCP_NAGLE_PUSH))))
+					(tcp_skb_is_last(meta_sk, skb) ?
+							nonagle : TCP_NAGLE_PUSH))))
 				break;
 		} else {
 			if (!push_one && tcp_tso_should_defer(meta_sk, skb))
@@ -1122,10 +1145,10 @@ retry:
 		limit = mss_now;
 		if (!meta_tp->mpc && tso_segs > 1 && !tcp_urg_mode(meta_tp))
 			limit = tcp_mss_split_point(meta_sk, skb, mss_now,
-						    cwnd_quota);
+					cwnd_quota);
 
 		if (skb->len > limit &&
-		    unlikely(mptso_fragment(meta_sk, skb, limit, mss_now, gfp, reinject)))
+				unlikely(mptso_fragment(meta_sk, skb, limit, mss_now, gfp, reinject)))
 			break;
 
 		subskb = mptcp_skb_entail(subsk, skb, reinject);
@@ -1141,8 +1164,8 @@ retry:
 
 		if (!reinject) {
 			mptcp_check_sndseq_wrap(meta_tp,
-						TCP_SKB_CB(skb)->end_seq -
-						TCP_SKB_CB(skb)->seq);
+					TCP_SKB_CB(skb)->end_seq -
+					TCP_SKB_CB(skb)->seq);
 			tcp_event_new_data_sent(meta_sk, skb);
 		}
 
@@ -1212,7 +1235,7 @@ u32 __mptcp_select_window(struct sock *sk)
 			 * MSS's among the subflows.
 			 */
 			meta_tp->rcv_ssthresh = min(meta_tp->rcv_ssthresh,
-						    4U * meta_tp->advmss);
+					4U * meta_tp->advmss);
 
 		if (free_space < mss)
 			return 0;
@@ -1233,9 +1256,9 @@ u32 __mptcp_select_window(struct sock *sk)
 		 * 1<<rcv_wscale > mss.
 		 */
 		if (((window >> tp->rx_opt.rcv_wscale) << tp->
-		     rx_opt.rcv_wscale) != window)
+				rx_opt.rcv_wscale) != window)
 			window = (((window >> tp->rx_opt.rcv_wscale) + 1)
-				  << tp->rx_opt.rcv_wscale);
+					<< tp->rx_opt.rcv_wscale);
 	} else {
 		/* Get the largest window that is a nice multiple of mss.
 		 * Window clamp already applied above.
@@ -1248,7 +1271,7 @@ u32 __mptcp_select_window(struct sock *sk)
 		if (window <= free_space - mss || window > free_space)
 			window = (free_space / mss) * mss;
 		else if (mss == full_space &&
-			 free_space > window + (full_space >> 1))
+				free_space > window + (full_space >> 1))
 			window = free_space;
 	}
 
@@ -1256,7 +1279,7 @@ u32 __mptcp_select_window(struct sock *sk)
 }
 
 void mptcp_syn_options(struct sock *sk, struct tcp_out_options *opts,
-		       unsigned *remaining)
+		unsigned *remaining)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
 
@@ -1292,7 +1315,7 @@ void mptcp_syn_options(struct sock *sk, struct tcp_out_options *opts,
 }
 
 void mptcp_synack_options(struct request_sock *req,
-			  struct tcp_out_options *opts, unsigned *remaining)
+		struct tcp_out_options *opts, unsigned *remaining)
 {
 	struct mptcp_request_sock *mtreq;
 	mtreq = mptcp_rsk(req);
@@ -1317,27 +1340,27 @@ void mptcp_synack_options(struct request_sock *req,
 		/* Finding Address ID */
 		if (req->rsk_ops->family == AF_INET)
 			mptcp_for_each_bit_set(mtreq->mpcb->loc4_bits, i) {
-				struct mptcp_loc4 *addr =
-						&mtreq->mpcb->locaddr4[i];
-				if (addr->addr.s_addr == ireq->loc_addr)
-					opts->addr_id = addr->id;
-			}
+			struct mptcp_loc4 *addr =
+					&mtreq->mpcb->locaddr4[i];
+			if (addr->addr.s_addr == ireq->loc_addr)
+				opts->addr_id = addr->id;
+		}
 #if IS_ENABLED(CONFIG_IPV6)
 		else /* IPv6 */
 			mptcp_for_each_bit_set(mtreq->mpcb->loc6_bits, i) {
-				struct mptcp_loc6 *addr =
-						&mtreq->mpcb->locaddr6[i];
-				if (ipv6_addr_equal(&addr->addr,
-						    &inet6_rsk(req)->loc_addr))
-					opts->addr_id = addr->id;
-			}
+			struct mptcp_loc6 *addr =
+					&mtreq->mpcb->locaddr6[i];
+			if (ipv6_addr_equal(&addr->addr,
+					&inet6_rsk(req)->loc_addr))
+				opts->addr_id = addr->id;
+		}
 #endif /* CONFIG_IPV6 */
 		*remaining -= MPTCP_SUB_LEN_JOIN_SYNACK_ALIGN;
 	}
 }
 
 void mptcp_established_options(struct sock *sk, struct sk_buff *skb,
-			       struct tcp_out_options *opts, unsigned *size)
+		struct tcp_out_options *opts, unsigned *size)
 {
 	struct tcp_sock *tp = tcp_sk(sk), *meta_tp = mptcp_meta_tp(tp);
 	struct mptcp_cb *mpcb = tp->mpcb;
@@ -1381,17 +1404,17 @@ void mptcp_established_options(struct sock *sk, struct sk_buff *skb,
 	 *       (even if it's very unlikely)
 	 */
 	if (mpcb->infinite_mapping_snd && tp->mptcp->fully_established &&
-	    ((mpcb->send_infinite_mapping && tcb &&
-	      !(tcb->mptcp_flags & MPTCPHDR_INF) &&
-	      !before(tcb->seq, tp->mptcp->infinite_cutoff_seq)) ||
-	     !mpcb->send_infinite_mapping))
+			((mpcb->send_infinite_mapping && tcb &&
+					!(tcb->mptcp_flags & MPTCPHDR_INF) &&
+					!before(tcb->seq, tp->mptcp->infinite_cutoff_seq)) ||
+					!mpcb->send_infinite_mapping))
 		return;
 
 	if (unlikely(tp->mptcp->include_mpc)) {
 		opts->options |= OPTION_MPTCP;
 		if (is_master_tp(tp)) {
 			opts->mptcp_options |= OPTION_MP_CAPABLE |
-					       OPTION_TYPE_ACK;
+					OPTION_TYPE_ACK;
 			*size += MPTCP_SUB_LEN_CAPABLE_ACK_ALIGN;
 			opts->mp_capable.sender_key = mpcb->mptcp_loc_key;
 			opts->mp_capable.receiver_key = mpcb->mptcp_rem_key;
@@ -1426,14 +1449,14 @@ void mptcp_established_options(struct sock *sk, struct sk_buff *skb,
 			 * either 10 or 12, and thus aligned = 12
 			 */
 			*size += MPTCP_SUB_LEN_ACK_ALIGN +
-				 MPTCP_SUB_LEN_SEQ_ALIGN;
+					MPTCP_SUB_LEN_SEQ_ALIGN;
 		}
 
 		*size += MPTCP_SUB_LEN_DSS_ALIGN;
 	}
 
 	if (unlikely(tp->mptcp->add_addr4) &&
-	    MAX_TCP_OPTION_SPACE - *size >= MPTCP_SUB_LEN_ADD_ADDR4_ALIGN) {
+			MAX_TCP_OPTION_SPACE - *size >= MPTCP_SUB_LEN_ADD_ADDR4_ALIGN) {
 		int ind = mptcp_find_free_index(~(tp->mptcp->add_addr4));
 		opts->options |= OPTION_MPTCP;
 		opts->mptcp_options |= OPTION_ADD_ADDR;
@@ -1442,7 +1465,7 @@ void mptcp_established_options(struct sock *sk, struct sk_buff *skb,
 			tp->mptcp->add_addr4 &= ~(1 << ind);
 		*size += MPTCP_SUB_LEN_ADD_ADDR4_ALIGN;
 	} else if (unlikely(tp->mptcp->add_addr6) &&
-		   MAX_TCP_OPTION_SPACE - *size >= MPTCP_SUB_LEN_ADD_ADDR6_ALIGN) {
+			MAX_TCP_OPTION_SPACE - *size >= MPTCP_SUB_LEN_ADD_ADDR6_ALIGN) {
 		int ind = mptcp_find_free_index(~(tp->mptcp->add_addr6));
 		opts->options |= OPTION_MPTCP;
 		opts->mptcp_options |= OPTION_ADD_ADDR;
@@ -1451,8 +1474,8 @@ void mptcp_established_options(struct sock *sk, struct sk_buff *skb,
 			tp->mptcp->add_addr6 &= ~(1 << ind);
 		*size += MPTCP_SUB_LEN_ADD_ADDR6_ALIGN;
 	} else if (unlikely(mpcb->remove_addrs) &&
-		   MAX_TCP_OPTION_SPACE - *size >=
-		   mptcp_sub_len_remove_addr_align(mpcb->remove_addrs)) {
+			MAX_TCP_OPTION_SPACE - *size >=
+			mptcp_sub_len_remove_addr_align(mpcb->remove_addrs)) {
 		opts->options |= OPTION_MPTCP;
 		opts->mptcp_options |= OPTION_REMOVE_ADDR;
 		opts->remove_addrs = mpcb->remove_addrs;
@@ -1460,22 +1483,22 @@ void mptcp_established_options(struct sock *sk, struct sk_buff *skb,
 		if (skb)
 			mpcb->remove_addrs = 0;
 	} else if (!(opts->mptcp_options & OPTION_MP_CAPABLE) &&
-		   !(opts->mptcp_options & OPTION_MP_JOIN) &&
-		   ((unlikely(tp->mptcp->add_addr6) &&
-		     MAX_TCP_OPTION_SPACE - *size <=
-		     MPTCP_SUB_LEN_ADD_ADDR6_ALIGN) ||
-		    (unlikely(tp->mptcp->add_addr4) &&
-		     MAX_TCP_OPTION_SPACE - *size >=
-		     MPTCP_SUB_LEN_ADD_ADDR4_ALIGN))) {
+			!(opts->mptcp_options & OPTION_MP_JOIN) &&
+			((unlikely(tp->mptcp->add_addr6) &&
+					MAX_TCP_OPTION_SPACE - *size <=
+					MPTCP_SUB_LEN_ADD_ADDR6_ALIGN) ||
+					(unlikely(tp->mptcp->add_addr4) &&
+							MAX_TCP_OPTION_SPACE - *size >=
+							MPTCP_SUB_LEN_ADD_ADDR4_ALIGN))) {
 		mptcp_debug("no space for add addr. unsent IPv4: %#x,IPv6: %#x\n",
-			    tp->mptcp->add_addr4, tp->mptcp->add_addr6);
+				tp->mptcp->add_addr4, tp->mptcp->add_addr6);
 		tp->mptcp_add_addr_ack = 1;
 		tcp_send_ack(sk);
 		tp->mptcp_add_addr_ack = 0;
 	}
 
 	if (unlikely(tp->mptcp->send_mp_prio) &&
-	    MAX_TCP_OPTION_SPACE - *size >= MPTCP_SUB_LEN_PRIO_ALIGN) {
+			MAX_TCP_OPTION_SPACE - *size >= MPTCP_SUB_LEN_PRIO_ALIGN) {
 		opts->options |= OPTION_MPTCP;
 		opts->mptcp_options |= OPTION_MP_PRIO;
 		if (skb)
@@ -1489,8 +1512,8 @@ void mptcp_established_options(struct sock *sk, struct sk_buff *skb,
 }
 
 void mptcp_options_write(__be32 *ptr, struct tcp_sock *tp,
-			 struct tcp_out_options *opts,
-			 struct sk_buff *skb)
+		struct tcp_out_options *opts,
+		struct sk_buff *skb)
 {
 	if (unlikely(OPTION_MP_CAPABLE & opts->mptcp_options)) {
 		struct mp_capable *mpc = (struct mp_capable *)ptr;
@@ -1498,7 +1521,7 @@ void mptcp_options_write(__be32 *ptr, struct tcp_sock *tp,
 		mpc->kind = TCPOPT_MPTCP;
 
 		if ((OPTION_TYPE_SYN & opts->mptcp_options) ||
-		    (OPTION_TYPE_SYNACK & opts->mptcp_options)) {
+				(OPTION_TYPE_SYNACK & opts->mptcp_options)) {
 			mpc->sender_key = opts->mp_capable.sender_key;
 			mpc->len = MPTCP_SUB_LEN_CAPABLE_SYN;
 			ptr += MPTCP_SUB_LEN_CAPABLE_SYN_ALIGN >> 2;
@@ -1534,14 +1557,14 @@ void mptcp_options_write(__be32 *ptr, struct tcp_sock *tp,
 		} else if (OPTION_TYPE_SYNACK & opts->mptcp_options) {
 			mpj->len = MPTCP_SUB_LEN_JOIN_SYNACK;
 			mpj->u.synack.mac =
-				opts->mp_join_syns.sender_truncated_mac;
+					opts->mp_join_syns.sender_truncated_mac;
 			mpj->u.synack.nonce = opts->mp_join_syns.sender_nonce;
 			mpj->b = tp->mptcp->low_prio;
 			ptr += MPTCP_SUB_LEN_JOIN_SYNACK_ALIGN >> 2;
 		} else if (OPTION_TYPE_ACK & opts->mptcp_options) {
 			mpj->len = MPTCP_SUB_LEN_JOIN_ACK;
 			memcpy(mpj->u.ack.mac,
-			       opts->mp_join_ack.sender_mac, 20);
+					opts->mp_join_ack.sender_mac, 20);
 			ptr += MPTCP_SUB_LEN_JOIN_ACK_ALIGN >> 2;
 		}
 	}
@@ -1562,7 +1585,7 @@ void mptcp_options_write(__be32 *ptr, struct tcp_sock *tp,
 			mpadd->ipver = 6;
 			mpadd->addr_id = opts->addr6->id;
 			memcpy(&mpadd->u.v6.addr, &opts->addr6->addr,
-			       sizeof(mpadd->u.v6.addr));
+					sizeof(mpadd->u.v6.addr));
 			ptr += MPTCP_SUB_LEN_ADD_ADDR6_ALIGN >> 2;
 		} else {
 			BUG();
@@ -1583,7 +1606,7 @@ void mptcp_options_write(__be32 *ptr, struct tcp_sock *tp,
 		addrs_id = &mprem->addrs_id;
 
 		mptcp_for_each_bit_set(opts->remove_addrs, id)
-			*(addrs_id++) = id;
+		*(addrs_id++) = id;
 
 		/* Fill the rest with NOP's */
 		if (len_align > len) {
@@ -1690,7 +1713,7 @@ struct sk_buff *mptcp_next_segment(struct sock *meta_sk, int *reinject)
 		skb = tcp_send_head(meta_sk);
 
 		if (!skb && meta_sk->sk_write_pending &&
-		    sk_stream_wspace(meta_sk) < sk_stream_min_wspace(meta_sk)) {
+				sk_stream_wspace(meta_sk) < sk_stream_min_wspace(meta_sk)) {
 			struct sock *subsk = get_available_subflow(meta_sk, NULL);
 			if (!subsk)
 				return NULL;
@@ -1727,7 +1750,7 @@ void mptcp_send_fin(struct sock *meta_sk)
 		/* Socket is locked, keep trying until memory is available. */
 		for (;;) {
 			skb = alloc_skb_fclone(MAX_TCP_HEADER,
-					       meta_sk->sk_allocation);
+					meta_sk->sk_allocation);
 			if (skb)
 				break;
 			yield();
@@ -1777,7 +1800,7 @@ void mptcp_send_active_reset(struct sock *meta_sk, gfp_t priority)
 
 	/** Reset all other subflows */
 
-found:
+	found:
 	/* tcp_done must be handled with bh disabled */
 	if (!in_serving_softirq())
 		local_bh_disable();
@@ -1800,7 +1823,7 @@ found:
 
 		meta_icsk->icsk_rto = min(inet_csk(sk)->icsk_rto, TCP_RTO_MAX);
 		inet_csk_reset_xmit_timer(meta_sk, ICSK_TIME_RETRANS,
-					  meta_icsk->icsk_rto, TCP_RTO_MAX);
+				meta_icsk->icsk_rto, TCP_RTO_MAX);
 	}
 
 	meta_tp->send_mp_fclose = 1;
@@ -1818,7 +1841,7 @@ void mptcp_ack_retransmit_timer(struct sock *sk)
 	skb = alloc_skb(MAX_TCP_HEADER, GFP_ATOMIC);
 	if (skb == NULL) {
 		sk_reset_timer(sk, &tp->mptcp->mptcp_ack_timer,
-			       jiffies + icsk->icsk_rto);
+				jiffies + icsk->icsk_rto);
 		return;
 	}
 
@@ -1835,11 +1858,11 @@ void mptcp_ack_retransmit_timer(struct sock *sk)
 		if (!icsk->icsk_retransmits)
 			icsk->icsk_retransmits = 1;
 		sk_reset_timer(sk, &tp->mptcp->mptcp_ack_timer,
-			       jiffies + icsk->icsk_rto);
+				jiffies + icsk->icsk_rto);
 		return;
 	}
 
-out:
+	out:
 	icsk->icsk_retransmits++;
 	if (icsk->icsk_retransmits == sysctl_tcp_retries1 + 1) {
 		sk_stop_timer(sk, &tp->mptcp->mptcp_ack_timer);
@@ -1850,7 +1873,7 @@ out:
 
 	icsk->icsk_rto = min(icsk->icsk_rto << 1, TCP_RTO_MAX);
 	sk_reset_timer(sk, &tp->mptcp->mptcp_ack_timer,
-		       jiffies + icsk->icsk_rto);
+			jiffies + icsk->icsk_rto);
 }
 
 void mptcp_ack_handler(unsigned long data)
@@ -1862,7 +1885,7 @@ void mptcp_ack_handler(unsigned long data)
 	if (sock_owned_by_user(meta_sk)) {
 		/* Try again later */
 		sk_reset_timer(sk, &tcp_sk(sk)->mptcp->mptcp_ack_timer,
-			       jiffies + (HZ / 20));
+				jiffies + (HZ / 20));
 		goto out_unlock;
 	}
 
@@ -1873,7 +1896,7 @@ void mptcp_ack_handler(unsigned long data)
 
 	sk_mem_reclaim(sk);
 
-out_unlock:
+	out_unlock:
 	bh_unlock_sock(meta_sk);
 	sock_put(sk);
 }
@@ -1901,7 +1924,7 @@ static int mptcp_retransmit_skb(struct sock *sk, struct sk_buff *skb)
 	 * This is a meta-retransmission thus we check on the meta-socket.
 	 */
 	if (atomic_read(&meta_sk->sk_wmem_alloc) >
-	    min(meta_sk->sk_wmem_queued + (meta_sk->sk_wmem_queued >> 2), meta_sk->sk_sndbuf)) {
+	min(meta_sk->sk_wmem_queued + (meta_sk->sk_wmem_queued >> 2), meta_sk->sk_sndbuf)) {
 		return -EAGAIN;
 	}
 
@@ -1923,7 +1946,7 @@ static int mptcp_retransmit_skb(struct sock *sk, struct sk_buff *skb)
 	 * our retransmit serves as a zero window probe.
 	 */
 	if (!before(TCP_SKB_CB(skb)->seq, tcp_wnd_end(tp)) &&
-	    TCP_SKB_CB(skb)->seq != tp->snd_una)
+			TCP_SKB_CB(skb)->seq != tp->snd_una)
 		return -EAGAIN;
 
 	if (skb->len > cur_mss) {
@@ -1945,12 +1968,12 @@ static int mptcp_retransmit_skb(struct sock *sk, struct sk_buff *skb)
 	 * since it is cheap to do so and saves bytes on the network.
 	 */
 	if (skb->len > 0 &&
-	    (TCP_SKB_CB(skb)->tcp_flags & TCPHDR_FIN) &&
-	    tp->snd_una == (TCP_SKB_CB(skb)->end_seq - 1)) {
+			(TCP_SKB_CB(skb)->tcp_flags & TCPHDR_FIN) &&
+			tp->snd_una == (TCP_SKB_CB(skb)->end_seq - 1)) {
 		if (!pskb_trim(skb, 0)) {
 			/* Reuse, even though it does some unnecessary work */
 			tcp_init_nondata_skb(skb, TCP_SKB_CB(skb)->end_seq - 1,
-					     TCP_SKB_CB(skb)->tcp_flags);
+					TCP_SKB_CB(skb)->tcp_flags);
 			skb->ip_summed = CHECKSUM_NONE;
 		}
 	}
@@ -1990,13 +2013,13 @@ void mptcp_retransmit_timer(struct sock *meta_sk)
 
 	/* In fallback, retransmission is handled at the subflow-level */
 	if (!meta_tp->packets_out || mpcb->infinite_mapping_snd ||
-	    mpcb->send_infinite_mapping)
+			mpcb->send_infinite_mapping)
 		return;
 
 	WARN_ON(tcp_write_queue_empty(meta_sk));
 
 	if (!meta_tp->snd_wnd && !sock_flag(meta_sk, SOCK_DEAD) &&
-	    !((1 << meta_sk->sk_state) & (TCPF_SYN_SENT | TCPF_SYN_RECV))) {
+			!((1 << meta_sk->sk_state) & (TCPF_SYN_SENT | TCPF_SYN_RECV))) {
 		/* Receiver dastardly shrinks window. Our retransmits
 		 * become zero probes, but we should not timeout this
 		 * connection. If the socket is an orphan, time it out,
@@ -2005,18 +2028,18 @@ void mptcp_retransmit_timer(struct sock *meta_sk)
 		struct inet_sock *meta_inet = inet_sk(meta_sk);
 		if (meta_sk->sk_family == AF_INET) {
 			LIMIT_NETDEBUG(KERN_DEBUG "TCP: Peer %pI4:%u/%u unexpectedly shrunk window %u:%u (repaired)\n",
-				       &meta_inet->inet_daddr,
-				       ntohs(meta_inet->inet_dport),
-				       meta_inet->inet_num, meta_tp->snd_una,
-				       meta_tp->snd_nxt);
+					&meta_inet->inet_daddr,
+					ntohs(meta_inet->inet_dport),
+					meta_inet->inet_num, meta_tp->snd_una,
+					meta_tp->snd_nxt);
 		}
 #if IS_ENABLED(CONFIG_IPV6)
 		else if (meta_sk->sk_family == AF_INET6) {
 			struct ipv6_pinfo *np = inet6_sk(meta_sk);
 			LIMIT_NETDEBUG(KERN_DEBUG "TCP: Peer %pI6:%u/%u unexpectedly shrunk window %u:%u (repaired)\n",
-				       &np->daddr, ntohs(meta_inet->inet_dport),
-				       meta_inet->inet_num, meta_tp->snd_una,
-				       meta_tp->snd_nxt);
+					&np->daddr, ntohs(meta_inet->inet_dport),
+					meta_inet->inet_num, meta_tp->snd_una,
+					meta_tp->snd_nxt);
 		}
 #endif
 		if (tcp_time_stamp - meta_tp->rcv_tstamp > TCP_RTO_MAX) {
@@ -2067,12 +2090,12 @@ void mptcp_retransmit_timer(struct sock *meta_sk)
 		if (!meta_icsk->icsk_retransmits)
 			meta_icsk->icsk_retransmits = 1;
 		inet_csk_reset_xmit_timer(meta_sk, ICSK_TIME_RETRANS,
-					  min(meta_icsk->icsk_rto, TCP_RESOURCE_PROBE_INTERVAL),
-					  TCP_RTO_MAX);
+				min(meta_icsk->icsk_rto, TCP_RESOURCE_PROBE_INTERVAL),
+				TCP_RTO_MAX);
 		return;
 	}
 
-out_backoff:
+	out_backoff:
 	/* Increase the timeout each time we retransmit.  Note that
 	 * we do not increase the rtt estimate.  rto is initialized
 	 * from rtt, but increases here.  Jacobson (SIGCOMM 88) suggests
@@ -2091,7 +2114,7 @@ out_backoff:
 	meta_icsk->icsk_backoff++;
 	meta_icsk->icsk_retransmits++;
 
-out_reset_timer:
+	out_reset_timer:
 	/* If stream is thin, use linear timeouts. Since 'icsk_backoff' is
 	 * used to reset timer, set to 0. Recalculate 'icsk_rto' as this
 	 * might be increased if the stream oscillates between thin and thick,
@@ -2102,9 +2125,9 @@ out_reset_timer:
 	 * linear-timeout retransmissions into a black hole
 	 */
 	if (meta_sk->sk_state == TCP_ESTABLISHED &&
-	    (meta_tp->thin_lto || sysctl_tcp_thin_linear_timeouts) &&
-	    tcp_stream_is_thin(meta_tp) &&
-	    meta_icsk->icsk_retransmits <= TCP_THIN_LINEAR_RETRIES) {
+			(meta_tp->thin_lto || sysctl_tcp_thin_linear_timeouts) &&
+			tcp_stream_is_thin(meta_tp) &&
+			meta_icsk->icsk_retransmits <= TCP_THIN_LINEAR_RETRIES) {
 		meta_icsk->icsk_backoff = 0;
 		/* We cannot do the same as in tcp_write_timer because the
 		 * srtt is not set here.
@@ -2120,7 +2143,7 @@ out_reset_timer:
 
 	return;
 
-send_mp_fclose:
+	send_mp_fclose:
 	if (tcp_write_timeout(meta_sk))
 		return;
 
@@ -2131,7 +2154,7 @@ send_mp_fclose:
 
 /* Modify values to an mptcp-level for the initial window of new subflows */
 void mptcp_select_initial_window(int *__space, __u32 *window_clamp,
-				 const struct sock *sk)
+		const struct sock *sk)
 {
 	struct mptcp_cb *mpcb = tcp_sk(sk)->mpcb;
 
@@ -2198,7 +2221,7 @@ int mptcp_check_snd_buf(const struct tcp_sock *tp)
 	}
 
 	bw_est = div64_u64(((u64)tp->snd_cwnd * rtt_max) << 16,
-				(u64)tp->srtt);
+			(u64)tp->srtt);
 
 	return max_t(unsigned int, (u32)(bw_est >> 16),
 			tp->reordering + 1);
@@ -2208,7 +2231,7 @@ int mptcp_check_snd_buf(const struct tcp_sock *tp)
 int mptcp_trim_head(struct sock *sk, struct sk_buff *skb, u32 len)
 {
 	int dsslen = MPTCP_SUB_LEN_DSS_ALIGN + MPTCP_SUB_LEN_ACK_ALIGN +
-		     MPTCP_SUB_LEN_SEQ_ALIGN;
+			MPTCP_SUB_LEN_SEQ_ALIGN;
 	char *dss[dsslen];
 
 	/* DSS-option must be recovered afterwards. */
