@@ -103,6 +103,7 @@ static int mptcp_dont_reinject_skb(struct tcp_sock *tp, struct sk_buff *skb)
 			((mptcp_is_data_fin(skb) && TCP_SKB_CB(skb)->end_seq - TCP_SKB_CB(skb)->seq  > 1) ||
 					!mptcp_is_data_fin(skb)) &&
 					/* Has the skb already been enqueued into this subsocket? */
+					/* TODO: we don't want to reinject on another path if possible - is this line responsible? */
 					mptcp_pi_to_flag(tp->mptcp->path_index) & TCP_SKB_CB(skb)->path_mask;
 }
 
@@ -166,20 +167,9 @@ static struct sock *get_available_subflow(struct sock *meta_sk,
 			bestsk = sk;
 		}
 	}
-
-
-	//	if (mpcb->cnt_established == cnt_backups && lowpriosk)
-	//		return lowpriosk;
-	//	if (bestsk)
-	//		return bestsk;
-	//	if (backupsk) {
-	//		/* It has been sent on all subflows once - let's give it a
-	//		 * chance again by restarting its pathmask.
-	//		 */
-	//		if (skb)
-	//			TCP_SKB_CB(skb)->path_mask = 0;
-	//		return backupsk;
-	//	}
+ /* Secure Scheduler: Ensure, that every 10th packet doesn't use the fastest subflow
+  * TODO: One may vary the number of derouted packets e.g. according to the RTT-difference of the links
+  */
 	if (pkt_nr%10 != 0)
 	{
 		pr_debug("MPTCP-SECSCHED pkt-nr= %i use fastest subflow \n",pkt_nr);
