@@ -35,8 +35,6 @@
 #include <net/mptcp.h>
 #include <net/sock.h>
 
-static unsigned int pkt_nr = 0;
-
 /* If the sub-socket sk available to send the skb? */
 static int mptcp_is_available(struct sock *sk, struct sk_buff *skb)
 {
@@ -167,24 +165,22 @@ static struct sock *get_available_subflow(struct sock *meta_sk,
 			bestsk = sk;
 		}
 	}
- /* Secure Scheduler: Ensure, that every 10th packet doesn't use the fastest subflow
-  * TODO: One may vary the number of derouted packets e.g. according to the RTT-difference of the links
-  */
-	if (pkt_nr%10 != 0)
+	/* Secure Scheduler: use different links according to the flag set in the app
+	 */
+	if (isImportantdata)
 	{
-		pr_debug("MPTCP-SECSCHED pkt-nr= %i use fastest subflow \n",pkt_nr);
-		pkt_nr++;
-		if (bestsk)
-			return bestsk;
-	}
-	else
-	{
-		pr_debug("MPTCP-SECSCHED pkt-nr= %i use backup subflow \n",pkt_nr);
-		pkt_nr++;
+		pr_debug("MPTCP-SECSCHED Important data - use backup subflow \n");
 		if (lowpriosk)
 			return lowpriosk;
 		if (backupsk)
 			return backupsk;
+	}
+	else
+	{
+		pr_debug("MPTCP-SECSCHED Unimportant data - use fastest subflow \n");
+		if (bestsk)
+			return bestsk;
+
 	}
 	/* should never be reached */
 	pr_debug("MPTCP-SECSCHED no suitable socket found \n");
