@@ -28,6 +28,8 @@
  *      2 of the License, or (at your option) any later version.
  */
 
+#define DEBUG
+
 #include <linux/kconfig.h>
 #include <linux/skbuff.h>
 #include <linux/tcp.h>
@@ -122,7 +124,7 @@ static struct sock *get_available_subflow(struct sock *meta_sk,
 
 	/* if there is only one subflow, bypass the scheduling function */
 	if (mpcb->cnt_subflows == 1) {
-		pr_info("MPTCP SecSched: There is only one subflow - no multipath-security possible \n");
+		printk (KERN_INFO "MPTCP SecSched: There is only one subflow - no multipath-security possible \n");
 		bestsk = (struct sock *)mpcb->connection_list;
 		if (!mptcp_is_available(bestsk, skb))
 			bestsk = NULL;
@@ -169,7 +171,7 @@ static struct sock *get_available_subflow(struct sock *meta_sk,
 	 */
 	if (isImportantdata)
 	{
-		pr_debug("MPTCP-SECSCHED Important data - use backup subflow \n");
+		printk("<1> MPTCP-SECSCHED Important data - use backup subflow \n");
 		if (lowpriosk)
 			return lowpriosk;
 		if (backupsk)
@@ -180,7 +182,6 @@ static struct sock *get_available_subflow(struct sock *meta_sk,
 		pr_debug("MPTCP-SECSCHED Unimportant data - use fastest subflow \n");
 		if (bestsk)
 			return bestsk;
-
 	}
 	/* should never be reached */
 	pr_debug("MPTCP-SECSCHED no suitable socket found \n");

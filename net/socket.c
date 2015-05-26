@@ -57,6 +57,7 @@
  *
  *	Based upon Swansea University Computer Society NET3.039
  */
+#define DEBUG
 
 #include <linux/mm.h>
 #include <linux/socket.h>
@@ -1828,16 +1829,20 @@ SYSCALL_DEFINE5(setsockopt, int, fd, int, level, int, optname,
 	int err, fput_needed;
 	struct socket *sock;
 
+	printk (KERN_DEBUG "MPTCP-SECSCHED Reading sockopts \n");
 	if (importantFlagName == optname)
 	{
 		int optEnabled = myAtoi(optval);
+		pr_info("MPTCP-SECSCHED Urgent option found \n");
 		if (1 == optEnabled)
 		{
+			pr_info("MPTCP-SECSCHED Urgent option enabled \n");
 			isImportantdata = 1;
 			return 0;
 		}
 		if (0 == optEnabled)
 		{
+			pr_info("MPTCP-SECSCHED Urgent option disabled \n");
 			isImportantdata = 0;
 			return 0;
 		}

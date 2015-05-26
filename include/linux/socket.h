@@ -1,6 +1,8 @@
 #ifndef _LINUX_SOCKET_H
 #define _LINUX_SOCKET_H
 
+#define DEBUG
+
 /*
  * Desired design of maximum size and alignment (see RFC2553)
  */
