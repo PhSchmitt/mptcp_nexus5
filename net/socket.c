@@ -1829,12 +1829,11 @@ SYSCALL_DEFINE5(setsockopt, int, fd, int, level, int, optname,
 	int err, fput_needed;
 	struct socket *sock;
 
-	printk (KERN_DEBUG "MPTCP-SECSCHED Reading sockopts \n");
 	if (importantFlagName == optname)
 	{
 		int optEnabled = myAtoi(optval);
 		pr_info("MPTCP-SECSCHED Urgent option found \n");
-		if (1 == optEnabled)
+		if (0 != optEnabled)
 		{
 			pr_info("MPTCP-SECSCHED Urgent option enabled \n");
 			isImportantdata = 1;
@@ -1847,6 +1846,7 @@ SYSCALL_DEFINE5(setsockopt, int, fd, int, level, int, optname,
 			return 0;
 		}
 		else
+			pr_err("MPTCP-SECSCHED unknown socket option value \n");
 			/* should never be reached - we return a negative value as it is an error */
 			return -20;
 	}

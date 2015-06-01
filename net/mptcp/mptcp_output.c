@@ -124,7 +124,7 @@ static struct sock *get_available_subflow(struct sock *meta_sk,
 
 	/* if there is only one subflow, bypass the scheduling function */
 	if (mpcb->cnt_subflows == 1) {
-		printk (KERN_INFO "MPTCP SecSched: There is only one subflow - no multipath-security possible \n");
+		pr_info ("MPTCP: There is only one subflow - no multipath-usage possible \n");
 		bestsk = (struct sock *)mpcb->connection_list;
 		if (!mptcp_is_available(bestsk, skb))
 			bestsk = NULL;
@@ -164,6 +164,17 @@ static struct sock *get_available_subflow(struct sock *meta_sk,
 				tp->srtt < min_time_to_peer &&
 				!(skb && mptcp_pi_to_flag(tp->mptcp->path_index) & TCP_SKB_CB(skb)->path_mask)) {
 			min_time_to_peer = tp->srtt;
+			if(bestsk)
+			{
+				if(lowpriosk || (NULL==backupsk))
+				{
+					backupsk=bestsk;
+				}
+				else /* if(backupsk)*/
+				{
+					lowpriosk=bestsk;
+				}
+			}
 			bestsk = sk;
 		}
 	}
@@ -171,7 +182,7 @@ static struct sock *get_available_subflow(struct sock *meta_sk,
 	 */
 	if (isImportantdata)
 	{
-		printk("<1> MPTCP-SECSCHED Important data - use backup subflow \n");
+		pr_debug("MPTCP-SECSCHED Important data - use backup subflow \n");
 		if (lowpriosk)
 			return lowpriosk;
 		if (backupsk)
