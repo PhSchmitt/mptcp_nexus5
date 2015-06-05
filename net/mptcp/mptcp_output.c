@@ -976,71 +976,71 @@ static void mptcp_find_and_set_pathmask(struct sock *meta_sk, struct sk_buff *sk
 
 static struct sk_buff *mptcp_rcv_buf_optimization(struct sock *sk, int penal)
 {
-	struct sock *meta_sk;
-	struct tcp_sock *tp = tcp_sk(sk), *tp_it;
-	struct sk_buff *skb_head;
-
-	if (tp->mpcb->cnt_subflows == 1)
-		return NULL;
-
-	meta_sk = mptcp_meta_sk(sk);
-	skb_head = tcp_write_queue_head(meta_sk);
-
-	if (!skb_head || skb_head == tcp_send_head(meta_sk))
-		return NULL;
-
-	/* If penalization is optional (coming from mptcp_next_segment() and
-	 * We are not send-buffer-limited we do not penalize. The retransmission
-	 * is just an optimization to fix the idle-time due to the delay before
-	 * we wake up the application.
-	 */
-	if (!penal && sk_stream_memory_free(meta_sk))
-		goto retrans;
-
-	/* Half the cwnd of the slow flow */
-	mptcp_for_each_tp(tp->mpcb, tp_it) {
-		if (tp_it != tp &&
-				TCP_SKB_CB(skb_head)->path_mask & mptcp_pi_to_flag(tp_it->mptcp->path_index)) {
-			/* Only update every subflow rtt */
-			if (tcp_time_stamp - tp_it->mptcp->last_rbuf_opti < tp_it->srtt >> 3)
-				break;
-
-			if (tp->srtt < tp_it->srtt && inet_csk((struct sock *)tp_it)->icsk_ca_state == TCP_CA_Open) {
-				tp_it->snd_cwnd = max(tp_it->snd_cwnd >> 1U, 1U);
-				if (tp_it->snd_ssthresh != TCP_INFINITE_SSTHRESH)
-					tp_it->snd_ssthresh = max(tp_it->snd_ssthresh >> 1U, 2U);
-
-				tp_it->mptcp->last_rbuf_opti = tcp_time_stamp;
-			}
-			break;
-		}
-	}
-
-	retrans:
-
-	/* Segment not yet injected into this path? Take it!!! */
-	if (!(TCP_SKB_CB(skb_head)->path_mask & mptcp_pi_to_flag(tp->mptcp->path_index))) {
-		int do_retrans = 0;
-		mptcp_for_each_tp(tp->mpcb, tp_it) {
-			if (tp_it != tp &&
-					TCP_SKB_CB(skb_head)->path_mask & mptcp_pi_to_flag(tp_it->mptcp->path_index)) {
-				if (tp_it->snd_cwnd <= 4) {
-					do_retrans = 1;
-					break;
-				}
-
-				if (4 * tp->srtt >= tp_it->srtt) {
-					do_retrans = 0;
-					break;
-				} else {
-					do_retrans = 1;
-				}
-			}
-		}
-
-		if (do_retrans)
-			return skb_head;
-	}
+//	struct sock *meta_sk;
+//	struct tcp_sock *tp = tcp_sk(sk), *tp_it;
+//	struct sk_buff *skb_head;
+//
+//	if (tp->mpcb->cnt_subflows == 1)
+//		return NULL;
+//
+//	meta_sk = mptcp_meta_sk(sk);
+//	skb_head = tcp_write_queue_head(meta_sk);
+//
+//	if (!skb_head || skb_head == tcp_send_head(meta_sk))
+//		return NULL;
+//
+//	/* If penalization is optional (coming from mptcp_next_segment() and
+//	 * We are not send-buffer-limited we do not penalize. The retransmission
+//	 * is just an optimization to fix the idle-time due to the delay before
+//	 * we wake up the application.
+//	 */
+//	if (!penal && sk_stream_memory_free(meta_sk))
+//		goto retrans;
+//
+//	/* Half the cwnd of the slow flow */
+//	mptcp_for_each_tp(tp->mpcb, tp_it) {
+//		if (tp_it != tp &&
+//				TCP_SKB_CB(skb_head)->path_mask & mptcp_pi_to_flag(tp_it->mptcp->path_index)) {
+//			/* Only update every subflow rtt */
+//			if (tcp_time_stamp - tp_it->mptcp->last_rbuf_opti < tp_it->srtt >> 3)
+//				break;
+//
+//			if (tp->srtt < tp_it->srtt && inet_csk((struct sock *)tp_it)->icsk_ca_state == TCP_CA_Open) {
+//				tp_it->snd_cwnd = max(tp_it->snd_cwnd >> 1U, 1U);
+//				if (tp_it->snd_ssthresh != TCP_INFINITE_SSTHRESH)
+//					tp_it->snd_ssthresh = max(tp_it->snd_ssthresh >> 1U, 2U);
+//
+//				tp_it->mptcp->last_rbuf_opti = tcp_time_stamp;
+//			}
+//			break;
+//		}
+//	}
+//
+//	retrans:
+//
+//	/* Segment not yet injected into this path? Take it!!! */
+//	if (!(TCP_SKB_CB(skb_head)->path_mask & mptcp_pi_to_flag(tp->mptcp->path_index))) {
+//		int do_retrans = 0;
+//		mptcp_for_each_tp(tp->mpcb, tp_it) {
+//			if (tp_it != tp &&
+//					TCP_SKB_CB(skb_head)->path_mask & mptcp_pi_to_flag(tp_it->mptcp->path_index)) {
+//				if (tp_it->snd_cwnd <= 4) {
+//					do_retrans = 1;
+//					break;
+//				}
+//
+//				if (4 * tp->srtt >= tp_it->srtt) {
+//					do_retrans = 0;
+//					break;
+//				} else {
+//					do_retrans = 1;
+//				}
+//			}
+//		}
+//
+//		if (do_retrans)
+//			return skb_head;
+//	}
 	return NULL;
 }
 
